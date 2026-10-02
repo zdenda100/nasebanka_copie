@@ -1,7 +1,7 @@
 import {initializeApp} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {getAuth,createUserWithEmailAndPassword,signInWithEmailAndPassword,signOut,EmailAuthProvider,reauthenticateWithCredential,updatePassword} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {runTransaction,getFirestore,doc as fdoc,getDoc,setDoc,updateDoc,deleteDoc,addDoc,query,where,onSnapshot as fsnap,collection as fcol} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-const CFG={apiKey:"AIzaSyCnPWMK6Wpsc0HcMDINp4PMAFqR66UCqC4",authDomain:"nasebanka-bd9b3.firebaseapp.com",projectId:"nasebanka-bd9b3",storageBucket:"nasebanka-bd9b3.firebasestorage.app",messagingSenderId:"164586585177",appId:"1:164586585177:web:4bfcc69af9d16ce99d0548"};
+const CFG={apiKey:"AIzaSyCnPWMK6Wpsc0HcMDINp4PMAFqR66UCqC4",authDomain:"nasebanka-bd9b3.firebaseapp.com",projectId:"nasebanka2",storageBucket:"nasebanka-bd9b3.firebasestorage.app",messagingSenderId:"164586585177",appId:"1:164586585177:web:4bfcc69af9d16ce99d0548"};
 const fbApp=initializeApp(CFG);
 const auth=getAuth(fbApp),fdb=getFirestore(fbApp);
 const ADMIN="zdenek.buchta@nasebanka.example";
