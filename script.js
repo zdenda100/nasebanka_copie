@@ -1,0 +1,597 @@
+import {initializeApp} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import {getAuth,createUserWithEmailAndPassword,signInWithEmailAndPassword,signOut,EmailAuthProvider,reauthenticateWithCredential,updatePassword} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import {runTransaction,getFirestore,doc as fdoc,getDoc,setDoc,updateDoc,deleteDoc,addDoc,query,where,onSnapshot as fsnap,collection as fcol} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+const CFG={apiKey:"AIzaSyCnPWMK6Wpsc0HcMDINp4PMAFqR66UCqC4",authDomain:"nasebanka-bd9b3.firebaseapp.com",projectId:"nasebanka-bd9b3",storageBucket:"nasebanka-bd9b3.firebasestorage.app",messagingSenderId:"164586585177",appId:"1:164586585177:web:4bfcc69af9d16ce99d0548"};
+const fbApp=initializeApp(CFG);
+const auth=getAuth(fbApp),fdb=getFirestore(fbApp);
+const ADMIN="zdenek.buchta@nasebanka.example";
+function wrap(x){return{id:x.id,exists:x.exists(),data:function(){return x.data()}}}
+const dbAdapter={
+  doc:function(p){var r=fdoc(fdb,p);return{
+    get:async function(){return wrap(await getDoc(r))},
+    set:function(d){return setDoc(r,d,{merge:true})},
+    update:function(d){return updateDoc(r,d)},
+    delete:function(){return deleteDoc(r)},
+    onSnapshot:function(cb,er){return fsnap(r,function(x){cb(wrap(x))},er)}}},
+  collection:function(p){var c=fcol(fdb,p);return{
+    onSnapshot:function(cb,er){return fsnap(c,function(x){cb({docs:x.docs.map(wrap)})},er)}}}
+};
+dbAdapter.add=function(p,d){return addDoc(fcol(fdb,p),d)};
+dbAdapter.where=function(p,f,v){var q=query(fcol(fdb,p),where(f,"==",v));return{onSnapshot:function(cb,er){return fsnap(q,function(x){cb({docs:x.docs.map(wrap)})},er)}}};
+var $=function(i){return document.getElementById(i)};
+function fresh(){return{nid:2,people:[{id:1,name:"Zdeněk Buchta",bal:500,tx:[]}]}}
+var S;
+try{var r=localStorage.getItem("nb1");S=r?JSON.parse(r):fresh()}catch(e){S=fresh()}
+if(!S||!S.people||!S.people.length)S=fresh();
+function save(){try{localStorage.setItem("nb1",JSON.stringify(S))}catch(e){}}
+function kc(n){return n.toLocaleString("cs-CZ",{minimumFractionDigits:2,maximumFractionDigits:2})+" Kč"}
+function esc(s){return String(s).replace(/[&<>"]/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]})}
+function now(){var d=new Date();return d.toLocaleDateString("cs-CZ")+" "+d.toLocaleTimeString("cs-CZ",{hour:"2-digit",minute:"2-digit"})}
+function find(id){return S.people.filter(function(p){return p.id===id})[0]}
+function log(p,t,a){p.tx.unshift({t:t,d:now(),a:a})}
+function r2(n){return Math.round(n*100)/100}
+function lastMon(){var d=new Date();d.setHours(0,0,0,0);d.setDate(d.getDate()-((d.getDay()+6)%7));return d.getTime()}
+function pushTx(o,t,a){o.tx=[{t:t,d:now(),a:a}].concat(o.tx||[]).slice(0,30)}
+function intr(o){
+  var lm=lastMon(),ch=false;
+  if(o.sav===undefined||o.sav===null){o.sav=0;ch=true}
+  if(!o.savAt){o.savAt=lm;return true}
+  var k=Math.min(520,Math.round((lm-o.savAt)/604800000));
+  if(k>0){if(o.sav>0){var ns=r2(o.sav*Math.pow(1.05,k));pushTx(o,"Úrok ze spoření 5 %",r2(ns-o.sav));o.sav=ns}o.savAt=lm;ch=true}
+  return ch;
+}
+function savCard(el,w){
+  if(el.getAttribute("data-n"))return;el.setAttribute("data-n","1");
+  el.innerHTML='<div class="card"><h2>Spořicí účet</h2><p>Každé pondělí dostaneš úrok 5 % z peněz na spoření. Zatím bez daní.</p><div class="big" style="font-size:1.8rem" id="sv'+w+'">0,00 Kč</div><small id="sn'+w+'"></small><label for="sa'+w+'">Částka (Kč)</label><input id="sa'+w+'" type="number" min="1" placeholder="100"><div class="row2"><button class="btn" data-sv="in" data-who="'+w+'">Vložit na spoření</button><button class="btn ghost" data-sv="out" data-who="'+w+'">Vybrat ze spoření</button></div><div class="msg" id="sm'+w+'" role="status"></div></div>';
+}
+function updSav(w,o){
+  var sv=o.sav||0,nx=new Date(lastMon()+7*86400000+3600000);
+  $("sv"+w).textContent=kc(sv);
+  $("sn"+w).textContent="Příští úrok v pondělí "+nx.getDate()+". "+(nx.getMonth()+1)+".: "+kc(r2(sv*0.05));
+}
+function mv(o,dir,v){
+  if(dir==="in"){if(v>o.bal)return "Na hlavním účtu není dost peněz.";o.bal=r2(o.bal-v);o.sav=r2((o.sav||0)+v);pushTx(o,"Vklad na spoření",-v)}
+  else{if(v>(o.sav||0))return "Na spoření není dost peněz.";o.sav=r2(o.sav-v);o.bal=r2(o.bal+v);pushTx(o,"Výběr ze spoření",v)}
+  return null;
+}
+document.addEventListener("click",async function(e){
+  var b=e.target.closest("button[data-sv]");if(!b)return;
+  var w=b.getAttribute("data-who"),dir=b.getAttribute("data-sv"),m=$("sm"+w),v=parseFloat($("sa"+w).value);
+  m.className="msg err";
+  if(!(v>0)){m.textContent="Zadej částku větší než 0.";return}
+  var er;
+  if(w==="A"){var o=S.people[0];intr(o);er=mv(o,dir,v);if(!er){render()}}
+  else{
+    try{var ref=db.doc("accounts/"+uid),o=JSON.parse(JSON.stringify((await ref.get()).data()));intr(o);er=mv(o,dir,v);
+      if(!er)await ref.update({bal:o.bal,sav:o.sav,savAt:o.savAt,tx:o.tx})}catch(x){er="Nepovedlo se."}
+  }
+  if(er){m.textContent=er;return}
+  m.className="msg ok";m.textContent=dir==="in"?"Vloženo na spoření: "+kc(v):"Vybráno ze spoření: "+kc(v);$("sa"+w).value="";
+});
+function cardNum(name){var h=7;for(var i=0;i<name.length;i++)h=(h*31+name.charCodeAt(i))%1000000007;var d=String(h*997%100000000).padStart(8,"0");return "9000 "+d.slice(0,4)+" "+d.slice(4)+" 0000"}
+var DES=[{id:"klasik",n:"Klasik",min:0,css:"linear-gradient(135deg,#0f4c45,#0a2925)"},{id:"pulnoc",n:"Půlnoc",min:1000,css:"linear-gradient(135deg,#0d0d0f,#2c2c31)"},{id:"slunce",n:"Slunce",min:2500,css:"linear-gradient(135deg,#ff9a3c,#ff4f81)"},{id:"ocean",n:"Oceán",min:5000,css:"linear-gradient(135deg,#0072ff,#00c6a7)"},{id:"neon",n:"Neon",min:10000,css:"linear-gradient(135deg,#7a2cff,#00e0ff)"},{id:"zlata",n:"Zlatá",min:25000,css:"linear-gradient(135deg,#f6d365,#b8860b)",dark:1},{id:"tym",n:"Tým",min:0,staff:1,css:"radial-gradient(circle at 70% 40%,#a855f7,transparent 45%),radial-gradient(circle at 55% 65%,#f59e0b,transparent 30%),linear-gradient(135deg,#141416,#0a0a0b)",art:'<svg class="art" viewBox="0 0 200 120" preserveAspectRatio="xMidYMid slice"><defs><filter id="liq" x="-20%" y="-20%" width="140%" height="140%"><feTurbulence type="fractalNoise" baseFrequency="0.018 0.04" numOctaves="3" seed="6"/><feDisplacementMap in="SourceGraphic" scale="46"/></filter></defs><g filter="url(#liq)"><ellipse cx="125" cy="55" rx="52" ry="34" fill="#8b3fe0"/><ellipse cx="150" cy="78" rx="30" ry="16" fill="#f59e0b" opacity=".85"/><ellipse cx="100" cy="48" rx="26" ry="14" fill="#c084fc"/><ellipse cx="140" cy="40" rx="22" ry="10" fill="#5b21b6"/></g></svg>'}];
+DES.push(...[{"id":"casino_ace","n":"Pikové eso","min":0,"owner":1,"css":"url(\"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22680%22%20height%3D%22428%22%20viewBox%3D%220%200%20680%20428%22%3E%3Cdefs%3E%3ClinearGradient%20id%3D%22bg%22%20x2%3D%221%22%20y2%3D%221%22%3E%3Cstop%20stop-color%3D%22%23111115%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%23171027%22%2F%3E%3C%2FlinearGradient%3E%3ClinearGradient%20id%3D%22accent%22%20x2%3D%22.5%22%20y2%3D%221%22%3E%3Cstop%20stop-color%3D%22%23b675ff%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%23382056%22%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Crect%20width%3D%22680%22%20height%3D%22428%22%20fill%3D%22url(%23bg)%22%2F%3E%3Cpath%20d%3D%22M240%20428C580%20320%20330%20120%20680%200V428Z%22%20fill%3D%22%23b675ff%22%20opacity%3D%22.09%22%2F%3E%3Cpath%20d%3D%22M510%2062C488%20103%20408%20148%20408%20199C408%20252%20472%20266%20501%20223C503%20261%20486%20280%20468%20294H552C534%20278%20519%20261%20520%20223C550%20266%20615%20252%20615%20199C615%20148%20536%20103%20510%2062Z%22%20fill%3D%22url(%23accent)%22%20opacity%3D%22.85%22%2F%3E%3C%2Fsvg%3E\") center/cover"},{"id":"casino_cherry","n":"Třešně","min":500,"css":"url(\"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22680%22%20height%3D%22428%22%20viewBox%3D%220%200%20680%20428%22%3E%3Cdefs%3E%3ClinearGradient%20id%3D%22bg%22%20x2%3D%221%22%20y2%3D%221%22%3E%3Cstop%20stop-color%3D%22%23230a13%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%23540e24%22%2F%3E%3C%2FlinearGradient%3E%3ClinearGradient%20id%3D%22accent%22%20x2%3D%22.5%22%20y2%3D%221%22%3E%3Cstop%20stop-color%3D%22%23ff526c%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%23a01535%22%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Crect%20width%3D%22680%22%20height%3D%22428%22%20fill%3D%22url(%23bg)%22%2F%3E%3Cpath%20d%3D%22M240%20428C580%20320%20330%20120%20680%200V428Z%22%20fill%3D%22%23ff526c%22%20opacity%3D%22.09%22%2F%3E%3Cpath%20d%3D%22M481%20177Q509%20115%20554%2088M565%20193L554%2088%22%20fill%3D%22none%22%20stroke%3D%22%23da4b65%22%20stroke-width%3D%2210%22%2F%3E%3Ccircle%20cx%3D%22471%22%20cy%3D%22208%22%20r%3D%2247%22%20fill%3D%22url(%23accent)%22%2F%3E%3Ccircle%20cx%3D%22577%22%20cy%3D%22231%22%20r%3D%2247%22%20fill%3D%22url(%23accent)%22%2F%3E%3C%2Fsvg%3E\") center/cover"},{"id":"casino_diamond","n":"Diamant","min":1500,"css":"url(\"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22680%22%20height%3D%22428%22%20viewBox%3D%220%200%20680%20428%22%3E%3Cdefs%3E%3ClinearGradient%20id%3D%22bg%22%20x2%3D%221%22%20y2%3D%221%22%3E%3Cstop%20stop-color%3D%22%23071324%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%23063550%22%2F%3E%3C%2FlinearGradient%3E%3ClinearGradient%20id%3D%22accent%22%20x2%3D%22.5%22%20y2%3D%221%22%3E%3Cstop%20stop-color%3D%22%2326d7f2%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%2308619d%22%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Crect%20width%3D%22680%22%20height%3D%22428%22%20fill%3D%22url(%23bg)%22%2F%3E%3Cpath%20d%3D%22M240%20428C580%20320%20330%20120%20680%200V428Z%22%20fill%3D%22%2326d7f2%22%20opacity%3D%22.09%22%2F%3E%3Cpath%20d%3D%22M424%20145L463%2089H563L610%20145L516%20281Z%22%20fill%3D%22url(%23accent)%22%2F%3E%3Cpath%20d%3D%22M424%20145H610M463%2089L487%20145L516%20281L549%20145L563%2089M487%20145L515%2089L549%20145%22%20fill%3D%22none%22%20stroke%3D%22%2370e6ff%22%20stroke-opacity%3D%22.5%22%20stroke-width%3D%222%22%2F%3E%3C%2Fsvg%3E\") center/cover"},{"id":"casino_seven","n":"Šťastná sedmička","min":3000,"css":"url(\"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22680%22%20height%3D%22428%22%20viewBox%3D%220%200%20680%20428%22%3E%3Cdefs%3E%3ClinearGradient%20id%3D%22bg%22%20x2%3D%221%22%20y2%3D%221%22%3E%3Cstop%20stop-color%3D%22%23161021%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%233d1546%22%2F%3E%3C%2FlinearGradient%3E%3ClinearGradient%20id%3D%22accent%22%20x2%3D%22.5%22%20y2%3D%221%22%3E%3Cstop%20stop-color%3D%22%23d8a5ff%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%239860ba%22%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Crect%20width%3D%22680%22%20height%3D%22428%22%20fill%3D%22url(%23bg)%22%2F%3E%3Cpath%20d%3D%22M240%20428C580%20320%20330%20120%20680%200V428Z%22%20fill%3D%22%23d8a5ff%22%20opacity%3D%22.09%22%2F%3E%3Cg%20fill%3D%22url(%23accent)%22%20transform%3D%22translate(394%20139)%20skewX(-10)%22%3E%3Cpath%20d%3D%22M0%200H70V22L32%20113H4L44%2025H0Z%22%2F%3E%3Cpath%20d%3D%22M78%200H148V22L110%20113H82L122%2025H78Z%22%2F%3E%3Cpath%20d%3D%22M156%200H226V22L188%20113H160L200%2025H156Z%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E\") center/cover"},{"id":"casino_chip","n":"Zlatý žeton","min":7500,"css":"url(\"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22680%22%20height%3D%22428%22%20viewBox%3D%220%200%20680%20428%22%3E%3Cdefs%3E%3ClinearGradient%20id%3D%22bg%22%20x2%3D%221%22%20y2%3D%221%22%3E%3Cstop%20stop-color%3D%22%23081c18%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%23203c22%22%2F%3E%3C%2FlinearGradient%3E%3ClinearGradient%20id%3D%22accent%22%20x2%3D%22.5%22%20y2%3D%221%22%3E%3Cstop%20stop-color%3D%22%23f5d778%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%23a47b22%22%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Crect%20width%3D%22680%22%20height%3D%22428%22%20fill%3D%22url(%23bg)%22%2F%3E%3Cpath%20d%3D%22M240%20428C580%20320%20330%20120%20680%200V428Z%22%20fill%3D%22%23f5d778%22%20opacity%3D%22.09%22%2F%3E%3Cg%20transform%3D%22translate(520%20193)%22%3E%3Ccircle%20r%3D%2290%22%20fill%3D%22none%22%20stroke%3D%22%23d4ad48%22%20stroke-width%3D%223%22%2F%3E%3Ccircle%20r%3D%2264%22%20fill%3D%22url(%23accent)%22%2F%3E%3Crect%20x%3D%22-7%22%20y%3D%22-84%22%20width%3D%2214%22%20height%3D%2218%22%20rx%3D%222%22%20fill%3D%22%23eed276%22%20transform%3D%22rotate(0)%22%2F%3E%3Crect%20x%3D%22-7%22%20y%3D%22-84%22%20width%3D%2214%22%20height%3D%2218%22%20rx%3D%222%22%20fill%3D%22%23eed276%22%20transform%3D%22rotate(45)%22%2F%3E%3Crect%20x%3D%22-7%22%20y%3D%22-84%22%20width%3D%2214%22%20height%3D%2218%22%20rx%3D%222%22%20fill%3D%22%23eed276%22%20transform%3D%22rotate(90)%22%2F%3E%3Crect%20x%3D%22-7%22%20y%3D%22-84%22%20width%3D%2214%22%20height%3D%2218%22%20rx%3D%222%22%20fill%3D%22%23eed276%22%20transform%3D%22rotate(135)%22%2F%3E%3Crect%20x%3D%22-7%22%20y%3D%22-84%22%20width%3D%2214%22%20height%3D%2218%22%20rx%3D%222%22%20fill%3D%22%23eed276%22%20transform%3D%22rotate(180)%22%2F%3E%3Crect%20x%3D%22-7%22%20y%3D%22-84%22%20width%3D%2214%22%20height%3D%2218%22%20rx%3D%222%22%20fill%3D%22%23eed276%22%20transform%3D%22rotate(225)%22%2F%3E%3Crect%20x%3D%22-7%22%20y%3D%22-84%22%20width%3D%2214%22%20height%3D%2218%22%20rx%3D%222%22%20fill%3D%22%23eed276%22%20transform%3D%22rotate(270)%22%2F%3E%3Crect%20x%3D%22-7%22%20y%3D%22-84%22%20width%3D%2214%22%20height%3D%2218%22%20rx%3D%222%22%20fill%3D%22%23eed276%22%20transform%3D%22rotate(315)%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E\") center/cover"},{"id":"casino_royal","n":"Royal","min":15000,"css":"url(\"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22680%22%20height%3D%22428%22%20viewBox%3D%220%200%20680%20428%22%3E%3Cdefs%3E%3ClinearGradient%20id%3D%22bg%22%20x2%3D%221%22%20y2%3D%221%22%3E%3Cstop%20stop-color%3D%22%23121017%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%2322142b%22%2F%3E%3C%2FlinearGradient%3E%3ClinearGradient%20id%3D%22accent%22%20x2%3D%22.5%22%20y2%3D%221%22%3E%3Cstop%20stop-color%3D%22%23bd81ff%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%23deb35e%22%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Crect%20width%3D%22680%22%20height%3D%22428%22%20fill%3D%22url(%23bg)%22%2F%3E%3Cpath%20d%3D%22M240%20428C580%20320%20330%20120%20680%200V428Z%22%20fill%3D%22%23bd81ff%22%20opacity%3D%22.09%22%2F%3E%3Cpath%20d%3D%22M320%20400Q630%20160%20680%20342V428Z%22%20fill%3D%22%23ac7b32%22%20opacity%3D%22.5%22%2F%3E%3Cpath%20d%3D%22M422%20174L451%20198L477%20141L510%20195L553%20143L572%20200L611%20167L590%20243H447Z%22%20fill%3D%22%23e8c56c%22%2F%3E%3Cpath%20d%3D%22M280%200Q660%20142%20433%20276Q580%20203%20680%20227V0Z%22%20fill%3D%22%23944ced%22%20opacity%3D%22.25%22%2F%3E%3C%2Fsvg%3E\") center/cover"}]);
+DES.forEach(function(d){if(d.id.startsWith('casino_')&&!d.owner){d.minChips=d.min/10;d.min=0}});
+function cardWealth(o){return (o.bal||0)+(o.sav||0)}
+function cardUnlocked(o,d){return d.minChips!==undefined?chipBalance(o)>=d.minChips:cardWealth(o)>=d.min}
+function cardLimitLabel(d){return d.minChips!==undefined?chips(d.minChips):kc(d.min).replace(',00','')}
+function isOwner(o,w){return w==="A"||o.id===1||o.role==="majitel"}
+function des(id){return DES.filter(function(d){return d.id===id})[0]||DES[0]}
+function isStaff(o,w){return w==="A"||o.id===1||o.role==="majitel"||o.role==="zastupce"}
+function effCard(o){var st=isStaff(o,"");var d=des(o.card||(st?"tym":"klasik"));if((d.owner&&!isOwner(o,""))||(d.staff&&!st))return "klasik";return cardUnlocked(o,d)?d.id:"klasik"}
+function setCard(el,name,did){
+  var k=name+"|"+did;if(el.getAttribute("data-n")===k)return;el.setAttribute("data-n",k);var d=des(did);
+  el.innerHTML='<div class="pcard" style="background:'+esc(d.css)+(d.dark?';color:#2b2000':'')+';position:relative;overflow:hidden">'+(d.art||"")+'<div class="top"><span>NašeBanka</span><div class="chip"></div></div><div class="num">'+cardNum(name)+'</div><div class="bot"><span>'+esc(name)+'</span><span>12/29</span></div></div>';
+}
+function gallery(el,w,o){
+  var sel=effCard(o),available=DES.filter(d=>(!d.owner||isOwner(o,w))&&(!d.staff||isStaff(o,w)));
+  function buttons(list){return list.map(function(d){var lock=!cardUnlocked(o,d);return '<button class="gi'+(d.id===sel?' on':'')+'" data-cd="'+d.id+'" data-who="'+w+'"'+(lock?' data-lock="1"':'')+'><span class="sw" style="background:'+esc(d.css)+(lock?';opacity:.35':'')+'"></span><b>'+d.n+'</b><small>'+(d.owner?'jen majitel':lock?'🔒 od '+cardLimitLabel(d):d.staff?'jen tým':(d.min||d.minChips)?'odemčeno':'základní')+'</small></button>'}).join('')}
+  el.innerHTML='<div class="card"><h2>Bankovní karty</h2><p>Odemčení podle zůstatku na běžném a spořicím účtu v Kč.</p><div class="gal">'+buttons(available.filter(d=>!d.id.startsWith('casino_')))+'</div><h2 style="margin-top:24px">Kasino karty · za žetony</h2><p>Odemčení podle aktuálního zůstatku žetonů. Žetony se neodečítají. Při poklesu pod limit se použije základní karta; po doplnění žetonů se vybraný motiv vrátí.</p><div class="gal">'+buttons(available.filter(d=>d.id.startsWith('casino_')))+'</div><div class="msg" id="cm'+w+'"></div></div>';
+}
+
+function render(){
+  setCard($("cardA"),S.people[0].name,effCard(S.people[0]));gallery($("cgA"),"A",S.people[0]);savCard($("savA"),"A");updSav("A",S.people[0]);
+  var me=S.people[0];
+  $("total").textContent=kc(me.bal);
+  $("txs").innerHTML=me.tx.length?me.tx.map(function(x){return '<div class="tx"><div><b>'+esc(x.t)+'</b><small>'+esc(x.d)+'</small></div><span class="'+(x.a<0?"neg":"pos")+'">'+(x.a>0?"+":"")+kc(x.a)+'</span></div>'}).join(""):'<p class="empty">Zatím žádné pohyby.</p>';
+  var others=S.people.slice(1);
+  $("to").innerHTML=others.length?others.map(function(p){return '<option value="'+p.id+'">'+esc(p.name)+'</option>'}).join(""):'<option value="">Nikdo další zatím není</option>';
+  $("plist").innerHTML=S.people.map(function(p){
+    return '<div class="prow"><div class="pn"><b>'+esc(p.name)+'</b>'+(p.id===1?'<span class="badge">Majitel</span>':'')+'<small>'+kc(p.bal)+(p.sav?' · spoření '+kc(p.sav):'')+'</small></div>'+
+    (p.id!==1?'<select class="rs" data-i="'+p.id+'" aria-label="Role pro '+esc(p.name)+'"><option value="zakaznik"'+(p.role==="zastupce"?'':' selected')+'>Zákazník</option><option value="zastupce"'+(p.role==="zastupce"?' selected':'')+'>Zástupce</option></select>':'')+
+    '<input type="number" min="1" class="ai" placeholder="Kč" aria-label="Částka pro '+esc(p.name)+'">'+
+    '<button class="btn sm" data-a="add" data-i="'+p.id+'">Přidat</button>'+
+    '<button class="btn sm ghost" data-a="sub" data-i="'+p.id+'">Odebrat</button>'+
+    (p.id!==1?'<button class="btn sm ghost" data-a="del" data-i="'+p.id+'">Smazat člověka</button>':'')+'</div>';
+  }).join("");
+  save();
+  if(db&&isAdmin)S.people.forEach(function(p){if(!p.uid)return;var j=JSON.stringify([p.name,p.bal,p.tx,p.role,p.sav,p.savAt,p.card]);if(sent[p.uid]!==j){sent[p.uid]=j;db.doc("accounts/"+p.uid).set({name:p.name,bal:p.bal,role:p.id===1?"majitel":(p.role||"zakaznik"),sav:p.sav||0,savAt:p.savAt||lastMon(),card:p.card||"klasik",tx:p.tx.slice(0,30)}).catch(function(x){var m=$("reqmsg");m.className="msg err";m.textContent="Účet se nepodařilo uložit: "+((x&&(x.code||x.message))||"")})}});
+}
+function amsg(t,ok){var m=$("amsg");m.className="msg "+(ok?"ok":"err");m.textContent=t}
+var watchD=false,db=dbAdapter,uid=null,unsubs=[],isAdmin=false,sent={},reqs=[],apps={},lastN=0;
+async function sha(t){var b=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(t));return Array.from(new Uint8Array(b)).map(function(x){return x.toString(16).padStart(2,"0")}).join("")}
+function show(id){["login","reg","wait","member","app"].forEach(function(x){$(x).classList.toggle("hidden",x!==id)});$("logout").classList.toggle("hidden",id==="login"||id==="reg");$("tabs").classList.toggle("hidden",!(id==="member"||id==="app"))}
+function noDb(el){el.textContent="Tohle funguje jen pro lidi přihlášené na claude.ai, kteří mají k této stránce přístup od správce."}
+$("toreg").onclick=function(){show("reg");$("logout").classList.add("hidden")};
+$("tolog").onclick=function(){show("login")};
+function stop(){watchD=false;unsubs.forEach(function(f){try{f()}catch(e){}});unsubs=[];isAdmin=false;document.title="NašeBanka – internetové bankovnictví"}
+async function sendReq(type,name){
+  var at=Date.now();show("wait");$("waitmsg").textContent="Účet se vytvoří, jakmile bude mít správce otevřenou stránku. Stránku nezavírej.";
+  try{await db.doc("requests/"+uid).set({name:name,type:type,at:at})}catch(e){show("login");$("lerr").textContent="Žádost se nepodařilo odeslat.";return}
+  unsubs.push(db.doc("approvals/"+uid).onSnapshot(function(sn){
+    var d=sn.exists&&sn.data();if(!d||d.reqAt!==at)return;
+    if(d.ok)enterMember(name);else $("waitmsg").textContent="Účet se nepodařilo vytvořit."
+  }));
+}
+var accts=[],myRole="zakaznik";
+function lbl(r){return r==="majitel"?"Majitel":r==="zastupce"?"Zástupce":"Zákazník"}
+function renderOthers(){
+  var sel=$("mto"),cur=sel.value,o=accts.filter(function(x){return x.id!==uid});
+  sel.innerHTML=o.length?o.map(function(x){return '<option value="'+esc(x.id)+'">'+esc(x.name)+'</option>'}).join(""):'<option value="">Nikdo další zatím není</option>';
+  if(cur)sel.value=cur;
+  if(myRole==="zastupce"&&!(document.activeElement&&document.activeElement.tagName==="INPUT"&&$("dlist").contains(document.activeElement)))$("dlist").innerHTML=accts.map(function(x){
+    var mine=x.id===uid,own=x.role==="majitel";
+    return '<div class="prow"><div class="pn"><b>'+esc(x.name)+'</b>'+(own?'<span class="badge">Majitel</span>':'')+'<small>'+lbl(x.role)+' · '+kc(x.bal)+'</small></div>'+
+    ((mine||own)?'':'<input type="number" min="1" class="ai" placeholder="Kč" aria-label="Částka pro '+esc(x.name)+'"><button class="btn sm" data-d="add" data-i="'+esc(x.id)+'">Přidat</button><button class="btn sm ghost" data-d="sub" data-i="'+esc(x.id)+'">Odebrat</button>'+(x.role==="zakaznik"?'<button class="btn sm ghost" data-x="del" data-i="'+esc(x.id)+'">Smazat</button>':''))+'</div>'}).join("");
+}
+function enterMember(name){
+  $("mwho").textContent=name;show("member");
+  unsubs.push(db.doc("accounts/"+uid).onSnapshot(function(sn){
+    var d=sn.exists&&sn.data();if(!d)return;
+    d=JSON.parse(JSON.stringify(d));
+    if(intr(d))db.doc("accounts/"+uid).update({sav:d.sav,savAt:d.savAt,tx:d.tx}).catch(function(){});
+    savCard($("savM"),"M");updSav("M",d);setCard($("cardM"),name,effCard(d));gallery($("cgM"),"M",d);
+    myRole=d.role||"zakaznik";$("mrole").textContent=lbl(myRole);$("tppl").classList.toggle("hidden",myRole!=="zastupce");$("deputy").classList.toggle("hidden",myRole!=="zastupce");
+    $("mtotal").textContent=kc(d.bal);
+    $("mtxs").innerHTML=(d.tx&&d.tx.length)?d.tx.map(function(x){return '<div class="tx"><div><b>'+esc(x.t)+'</b><small>'+esc(x.d)+'</small></div><span class="'+(x.a<0?"neg":"pos")+'">'+(x.a>0?"+":"")+kc(x.a)+'</span></div>'}).join(""):'<p class="empty">Zatím žádné pohyby.</p>';
+    renderOthers();
+  }));
+  unsubs.push(db.collection("accounts").onSnapshot(function(sn){accts=sn.docs.map(function(d){var o=d.data();o.id=d.id;return o});renderOthers()}));
+}
+$("dlist").onclick=async function(e){
+  var b=e.target.closest("button[data-d]");if(!b)return;
+  var row=b.parentNode,m=$("dmsg"),v=parseFloat(row.querySelector(".ai").value),id=b.getAttribute("data-i"),add=b.getAttribute("data-d")==="add";
+  m.className="msg err";
+  if(!(v>0)){m.textContent="Zadej částku větší než 0.";return}
+  try{
+    var ref=db.doc("accounts/"+id),o=(await ref.get()).data();
+    if(!add&&v>o.bal){m.textContent=o.name+" má jen "+kc(o.bal)+".";return}
+    await ref.update({bal:r2(o.bal+(add?v:-v)),tx:[{t:add?"Vklad od zástupce":"Odečteno zástupcem",d:now(),a:add?v:-v}].concat(o.tx||[]).slice(0,30)});
+    m.className="msg ok";m.textContent=(add?"Přidáno ":"Odebráno ")+kc(v)+": "+o.name;
+    row.querySelector(".ai").value="";if(document.activeElement&&document.activeElement.blur)document.activeElement.blur();
+  }catch(x){m.textContent="Nepovedlo se: "+((x&&(x.code||x.message))||"neznámá chyba")}
+};
+async function sendMoney(to,v,n){
+  var me=(await db.doc("accounts/"+uid).get()).data(),tg=await db.doc("accounts/"+to).get();
+  if(!tg.exists)return "Příjemce neexistuje.";
+  if(v>me.bal)return "Na účtu není dost peněz.";
+  var td=tg.data(),at=now();
+  await db.doc("accounts/"+uid).update({bal:r2(me.bal-v),tx:[{t:"Platba → "+td.name+(n?" ("+n+")":""),d:at,a:-v}].concat(me.tx||[]).slice(0,30)});
+  await db.doc("accounts/"+to).update({bal:r2(td.bal+v),tx:[{t:"Od "+me.name+(n?" ("+n+")":""),d:at,a:v}].concat(td.tx||[]).slice(0,30)});
+  return null;
+}
+$("mpay").onclick=async function(){
+  var m=$("mmsg"),to=$("mto").value,v=parseFloat($("mamt").value),n=$("mnote").value.trim();m.className="msg err";
+  if(!to){m.textContent="Vyber příjemce.";return}
+  if(!(v>0)){m.textContent="Zadej částku větší než 0.";return}
+  try{var er=await sendMoney(to,v,n);if(er){m.textContent=er;return}m.className="msg ok";m.textContent="Platba odeslána: "+kc(v);$("mamt").value="";$("mnote").value=""}catch(x){m.textContent="Platba se nepovedla."}
+};
+
+$("ppl").appendChild($("admin"));$("ppl").appendChild($("deputy"));
+var myName="",myDoc={},msgsIn=[],msgsOut=[],anns=[],curTab="acc",stream=null,scanOn=false;
+function mapd(sn){return sn.docs.map(function(d){var o=d.data();o.id=d.id;return o})}
+function nameOf(id){var a=accts.filter(function(x){return x.id===id})[0];return a?a.name:"?"}
+async function createPerson(name,pw){
+  var app2=initializeApp(CFG,"sec"+Date.now()),a2=getAuth(app2),f2=getFirestore(app2);
+  var c=await createUserWithEmailAndPassword(a2,mail(name),pw);
+  await setDoc(fdoc(f2,"accounts/"+c.user.uid),{name:name,bal:500,role:"zakaznik",sav:0,savAt:lastMon(),tx:[]});
+  await setDoc(fdoc(f2,"logins/"+slug(name)),{email:mail(name),uid:c.user.uid}).catch(function(){});
+  await signOut(a2);
+}
+$("dadd").onclick=async function(){
+  var m=$("dmsg"),n=$("dn").value.trim(),pw=$("dp").value;m.className="msg err";
+  if(!n||!pw){m.textContent="Zadej jméno i heslo.";return}
+  if(!mail(n)){m.textContent="Jméno musí obsahovat písmena nebo čísla.";return}
+  try{await createPerson(n,pw);$("dn").value="";$("dp").value="";m.className="msg ok";m.textContent=n+" přidán(a) s 500 Kč."}catch(x){m.textContent=aerr(x.code)}
+};
+$("dlist").addEventListener("click",async function(e){
+  var b=e.target.closest("button[data-x]");if(!b)return;var m=$("dmsg");
+  try{await db.doc("accounts/"+b.getAttribute("data-i")).delete();m.className="msg ok";m.textContent="Smazáno."}catch(x){m.className="msg err";m.textContent="Nepovedlo se."}
+});
+function tab(t){
+  curTab=t;
+  ["team","ann","qr","set","loan","rr","ppl"].forEach(function(x){$(x).classList.toggle("hidden",x!==t)});
+  (isAdmin?$("app"):$("member")).classList.toggle("hidden",t!=="acc");
+  document.querySelectorAll("#tabs button").forEach(function(b){b.classList.toggle("on",b.getAttribute("data-t")===t)});
+  $("admin").classList.toggle("hidden",!isAdmin);
+  $("deputy").classList.toggle("hidden",isAdmin||myRole!=="zastupce");
+  if(t!=="qr")stopScan();
+  if(t==="ann")markAnn();if(t==="qr")drawQR();
+}
+$("tabs").onclick=function(e){var b=e.target.closest("button");if(b)tab(b.getAttribute("data-t"))};
+function startCommon(){
+  startChips();
+  startLoanPayments();
+  $("tppl").classList.toggle("hidden",!(isAdmin||myRole==="zastupce"));
+  $("annnew").classList.toggle("hidden",!isAdmin);
+  unsubs.push(db.doc("accounts/"+uid).onSnapshot(function(sn){myDoc=sn.exists?sn.data():{};badges();renderLoan();renderRR()}));
+  unsubs.push(db.collection("announcements").onSnapshot(function(sn){anns=mapd(sn);renderAnn();badges();if(curTab==="ann")markAnn()}));
+  unsubs.push(db.collection("accounts").onSnapshot(function(sn){accts=mapd(sn);renderTeam()}));
+}
+function badges(){
+  var a=anns.filter(function(x){return x.at>(myDoc.annSeen||0)}).length,e=$("nba");
+  e.textContent=a;e.classList.toggle("hidden",!a);
+}
+function markAnn(){if(anns.some(function(x){return x.at>(myDoc.annSeen||0)}))db.doc("accounts/"+uid).update({annSeen:Date.now()}).catch(function(){})}
+function renderTeam(){
+  renderChipAdmin();
+  var ord={majitel:0,zastupce:1,zakaznik:2};
+  $("tlist").innerHTML=accts.slice().sort(function(a,b){var x=ord[a.role],y=ord[b.role];return (x===undefined?2:x)-(y===undefined?2:y)||String(a.name).localeCompare(b.name)}).map(function(x){
+    return '<div class="prow"><div class="pn"><b>'+esc(x.name)+'</b><small>'+lbl(x.role)+'</small></div>'+(x.role==="majitel"||x.role==="zastupce"?'<span class="badge">'+lbl(x.role)+'</span>':'')+'</div>'}).join("")||'<p class="empty">Zatím nikdo.</p>';
+}
+function renderAnn(){
+  $("annl").innerHTML=anns.slice().sort(function(a,b){return b.at-a.at}).map(function(x){return '<div class="tx"><div><b>'+esc(x.text)+'</b><small>'+esc(x.by||"")+' · '+new Date(x.at).toLocaleString("cs-CZ")+'</small></div></div>'}).join("")||'<p class="empty">Zatím žádná oznámení.</p>';
+}
+$("annsend").onclick=async function(){
+  var t=$("annt").value.trim(),m=$("annmsg");m.className="msg err";
+  if(!t){m.textContent="Napiš oznámení.";return}
+  try{await db.add("announcements",{text:t,at:Date.now(),by:myName});$("annt").value="";m.className="msg ok";m.textContent="Odesláno všem."}catch(x){m.textContent="Nepovedlo se."}
+};
+function drawQR(){
+  var a=parseFloat($("qamt").value)||0,p="NB|"+uid+"|"+(a>0?a:"");
+  if(window.qrcode){var q=qrcode(0,"M");q.addData(p);q.make();$("qrimg").innerHTML=q.createSvgTag(5,0)}else $("qrimg").textContent="QR knihovna se nenačetla.";
+}
+$("qamt").oninput=drawQR;
+function stopScan(){scanOn=false;if(stream)stream.getTracks().forEach(function(t){t.stop()});stream=null;$("qvid").classList.add("hidden");$("qscan").textContent="Zapnout kameru"}
+$("qscan").onclick=async function(){
+  var r=$("qres");r.className="msg";r.textContent="";
+  if(scanOn){stopScan();return}
+  try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"}})}catch(e){r.className="msg err";r.textContent="Kamera není dostupná.";return}
+  var v=$("qvid");v.srcObject=stream;v.classList.remove("hidden");await v.play();scanOn=true;$("qscan").textContent="Vypnout kameru";
+  var c=$("qcan"),cx=c.getContext("2d");
+  (function loop(){
+    if(!scanOn)return;
+    if(v.readyState===4&&window.jsQR){c.width=v.videoWidth;c.height=v.videoHeight;cx.drawImage(v,0,0);var im=cx.getImageData(0,0,c.width,c.height),code=jsQR(im.data,c.width,c.height);if(code&&code.data.indexOf("NB|")===0){stopScan();gotQR(code.data);return}}
+    requestAnimationFrame(loop);
+  })();
+};
+async function gotQR(d){
+  var p=d.split("|"),to=p[1],amt=parseFloat(p[2])||0,r=$("qres");
+  if(to===uid){r.className="msg err";r.textContent="To je tvůj vlastní kód.";return}
+  var tg=await db.doc("accounts/"+to).get();
+  if(!tg.exists){r.className="msg err";r.textContent="Účet neexistuje.";return}
+  var nm=tg.data().name;
+  $("qpay").innerHTML='<p><b>Zaplatit: '+esc(nm)+'</b></p><input id="qpa" type="number" min="1" placeholder="Částka (Kč)" value="'+(amt>0?amt:"")+'"'+(amt>0?' readonly':'')+'><p style="margin-top:12px"><button class="btn" id="qpb">Zaplatit</button></p>';
+  $("qpb").onclick=async function(){
+    var v=parseFloat($("qpa").value);r.className="msg err";
+    if(!(v>0)){r.textContent="Zadej částku.";return}
+    try{var er=await sendMoney(to,v,"QR platba");if(er){r.textContent=er;return}
+      r.className="msg ok";r.textContent="Zaplaceno: "+kc(v)+" → "+nm;$("qpay").innerHTML=""}catch(x){r.textContent="Platba se nepovedla."}
+  };
+}
+document.addEventListener("click",function(e){
+  var b=e.target.closest("button[data-cd]");if(!b)return;
+  var w=b.getAttribute("data-who"),m=$("cm"+w),id=b.getAttribute("data-cd");
+  if(des(id).owner&&!isAdmin){m.textContent="Tato karta je jen pro majitele.";return}
+  if(b.getAttribute("data-lock")){m.className="msg err";m.textContent="Karta se odemkne od "+cardLimitLabel(des(id))+".";return}
+  if(w==="A"){S.people[0].card=id;render()}else{db.doc("accounts/"+uid).update({card:id}).catch(function(){})}
+});
+function slug(n){
+  var k=n.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^a-z0-9]+/g,".").replace(/^\.+|\.+$/g,"");
+  if(k.length>50){var h=5381;for(var i=0;i<k.length;i++)h=((h*33)^k.charCodeAt(i))>>>0;k=k.slice(0,40)+"."+h.toString(36)}
+  return k;
+}
+function mail(n){var k=slug(n);return k?k+"@nasebanka.example":""}
+async function emailFor(n){try{var l=await db.doc("logins/"+slug(n)).get();if(l.exists)return l.data().email}catch(e){}return mail(n)}
+function aerr(c){
+  if(c==="auth/email-already-in-use")return "Tohle jméno už je zaregistrované.";
+  if(c==="auth/weak-password")return "Heslo musí mít aspoň 6 znaků.";
+  if(c==="auth/too-many-requests")return "Příliš mnoho pokusů, zkus to za chvíli.";
+  if(c==="auth/invalid-credential"||c==="auth/wrong-password"||c==="auth/user-not-found"||c==="auth/invalid-login-credentials")return "Nesprávné jméno nebo heslo.";
+  return "Něco se nepovedlo ("+c+").";
+}
+$("ssave").onclick=async function(){
+  var nn=$("sname").value.trim(),m=$("smsg1"),k=slug(nn);m.className="msg err";
+  if(!k){m.textContent="Zadej nové jméno.";return}
+  if(accts.some(function(a){return a.id!==uid&&slug(a.name||"")===k})){m.textContent="Tohle jméno už někdo má.";return}
+  try{
+    var u=auth.currentUser,ex=await db.doc("logins/"+k).get();
+    if(ex.exists&&ex.data().uid!==uid){m.textContent="Tohle jméno už někdo má.";return}
+    if(!ex.exists)await db.doc("logins/"+k).set({email:u.email,uid:uid});
+    var ok=slug(myName);if(ok!==k)db.doc("logins/"+ok).delete().catch(function(){});
+    await db.doc("accounts/"+uid).update({name:nn});
+    myName=nn;$("mwho").textContent=nn;$("who").textContent=nn;
+    m.className="msg ok";m.textContent="Jméno změněno na "+nn+".";$("sname").value="";
+  }catch(x){m.textContent="Nepovedlo se: "+((x&&(x.code||x.message))||"")}
+};
+$("spsave").onclick=async function(){
+  var op=$("sop").value,np=$("snp").value,m=$("smsg2");m.className="msg err";
+  if(!op||!np){m.textContent="Vyplň staré i nové heslo.";return}
+  try{var u=auth.currentUser;await reauthenticateWithCredential(u,EmailAuthProvider.credential(u.email,op));await updatePassword(u,np);$("sop").value="";$("snp").value="";m.className="msg ok";m.textContent="Heslo změněno."}
+  catch(x){m.textContent=(x.code==="auth/invalid-credential"||x.code==="auth/wrong-password")?"Staré heslo není správně.":aerr(x.code)}
+};
+var LOAN_MAX=100000,LOAN_FEE=0.1,REDS=[1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36],RRC={red:"#c62828",black:"#222",green:"#1b7a4b"},RRN={red:"červená",black:"černá",green:"zelená"},rrHist=[],spinning=false;
+function errt(x){return "Nepovedlo se: "+((x&&(x.code||x.message))||"")}
+function renderLoan(){$("lvdebt").textContent=kc(myDoc.loan||0);var p=myDoc.loanPlan;$('lplanstatus').textContent=!(myDoc.loan>0)?'Nemáš žádný dluh.':p?'Plán: '+kc(p.amount)+' · '+({daily:'denně',weekly:'týdně',monthly:'měsíčně'}[p.frequency])+' · další splátka '+p.nextDate+' ve 20:00.':'U této půjčky ještě není nastavený plán splácení.';}
+function renderRR(){renderCasino()}
+async function myAcct(){return (await db.doc("accounts/"+uid).get()).data()}
+function dueTime(date){return roundAt(Date.parse(date+'T12:00:00Z')).closesAt}
+function readLoanPlan(){
+  var amount=Number($('lautoamount').value),date=$('lautodate').value,frequency=$('lautofreq').value;
+  if(!Number.isFinite(amount)||amount<=0||amount>110000||r2(amount)!==amount)throw Error('Zadej automatickou splátku od 0,01 do 110 000 Kč.');
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(date)||!Number.isFinite(Date.parse(date+'T12:00:00Z'))||dueTime(date)<=Date.now())throw Error('Vyber datum první splátky, jehož 20:00 ještě nenastalo.');
+  if(!['daily','weekly','monthly'].includes(frequency))throw Error('Vyber četnost splácení.');
+  return {amount,frequency,nextDate:date,anchorDay:Number(date.slice(8))};
+}
+function nextLoanDate(plan){
+  var d=new Date(plan.nextDate+'T12:00:00Z');
+  if(plan.frequency==='monthly'){
+    d.setUTCDate(1);d.setUTCMonth(d.getUTCMonth()+1);
+    var last=new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+1,0)).getUTCDate();d.setUTCDate(Math.min(plan.anchorDay,last));
+  }else d.setUTCDate(d.getUTCDate()+(plan.frequency==='weekly'?7:1));
+  return d.toISOString().slice(0,10);
+}
+function loanPaymentDue(me,time,own){
+  var p=me.loanPlan;if(!p||!(me.loan>0)||!Number.isFinite(p.amount)||p.amount<=0||!['daily','weekly','monthly'].includes(p.frequency)||!(p.anchorDay>=1&&p.anchorDay<=31)||!/^\d{4}-\d{2}-\d{2}$/.test(p.nextDate))return null;
+  p={...p};var debt=r2(me.loan),balance=r2(me.bal),total=0,count=0;
+  while(debt>0&&dueTime(p.nextDate)<=time&&count<3660){
+    var installment=Math.min(p.amount,debt);if(balance<installment)break;
+    total=r2(total+installment);debt=r2(debt-installment);if(!own)balance=r2(balance-installment);count++;
+    p.nextDate=nextLoanDate(p);
+  }
+  return count?{total,count,debt,balance,plan:debt>0?p:null}:null;
+}
+$('lschedule').onclick=async function(){var m=$('lmsg');m.className='msg err';this.disabled=true;
+  try{var plan=readLoanPlan(),id=uid;await runTransaction(fdb,async tr=>{var ref=fdoc(fdb,'accounts',id),sn=await tr.get(ref);if(!sn.exists()||!(sn.data().loan>0))throw Error('Nejdřív si vezmi půjčku.');tr.update(ref,{loanPlan:plan})});m.className='msg ok';m.textContent='Plán splácení uložen.';
+  }catch(e){m.textContent=errt(e)}finally{this.disabled=false}
+};
+var payingLoans=false;
+async function payDueLoans(){
+  if(payingLoans||!uid)return;var owner=accts.find(x=>x.role==='majitel');if(!owner)return;
+  var activeUid=uid,ids=(isAdmin?accts:accts.filter(x=>x.id===activeUid)).filter(x=>x.loan>0&&x.loanPlan&&dueTime(x.loanPlan.nextDate)<=Date.now()).map(x=>x.id);
+  if(!ids.length)return;payingLoans=true;
+  try{for(var id of ids){if(uid!==activeUid)break;await runTransaction(fdb,async tr=>{
+    var ref=fdoc(fdb,'accounts',id),sn=await tr.get(ref);if(!sn.exists())return;
+    var me=sn.data(),payment=loanPaymentDue(me,Date.now(),id===owner.id);if(!payment)return;
+    var or=fdoc(fdb,'accounts',owner.id),os=id===owner.id?sn:await tr.get(or);if(!os.exists())throw Error('Účet majitele neexistuje.');
+    tr.update(ref,{bal:payment.balance,loan:payment.debt,loanPlan:payment.plan,tx:txlog(me,'Automatická splátka půjčky ('+payment.count+'×)'+(id===owner.id?' · příjem majitele':''),id===owner.id?0:-payment.total)});
+    if(id!==owner.id)tr.update(or,{bal:r2(os.data().bal+payment.total),tx:txlog(os.data(),'Automatická splátka od '+me.name,payment.total)});
+  })}}catch(e){$('lmsg').className='msg err';$('lmsg').textContent=errt(e)}finally{payingLoans=false}
+}
+function startLoanPayments(){var timer=setInterval(payDueLoans,15000);unsubs.push(()=>clearInterval(timer));}
+
+function amount(v){return Number.isSafeInteger(v)&&v>0&&v<=1000000000}
+function ownerId(){var o=accts.find(x=>x.role==='majitel');if(!o)throw Error('Účet majitele ještě není načtený. Zkus to za chvíli.');return o.id}
+function txlog(o,t,v){return [{t:t,d:now(),a:v}].concat(o.tx||[]).slice(0,30)}
+async function loanChange(mode){
+  var m=$('lmsg');m.className='msg err';
+  ['ltake','lrepay','lall'].forEach(x=>$(x).disabled=true);
+  try{var entered=Number($(mode==='take'?'lamt':'lpay').value),oid=mode==='take'?null:ownerId(),plan=mode==='take'?readLoanPlan():null;
+    var paid=await runTransaction(fdb,async tr=>{
+      var ref=fdoc(fdb,'accounts',uid),sn=await tr.get(ref),me=sn.data(),debt=me.loan||0,v=mode==='all'?debt:entered;
+      if(!Number.isFinite(v)||v<=0||r2(v)!==v)throw Error('Zadej kladnou částku, nejvýše na dvě desetinná místa.');
+      if(mode==='take'){
+        if(v>LOAN_MAX)throw Error('Maximum půjčky je 100 000 Kč.');if(debt>0)throw Error('Nejdřív splať stávající půjčku.');
+        tr.update(ref,{bal:r2(me.bal+v),loan:r2(v*1.1),loanPlan:plan,loanAt:Date.now(),tx:txlog(me,'Půjčka od banky',v)});
+      }else{
+        if(debt<=0)throw Error('Nemáš žádnou půjčku.');v=Math.min(v,debt);if(v>me.bal)throw Error('Na účtu není dost peněz.');
+        var or=fdoc(fdb,'accounts',oid),os=oid===uid?sn:await tr.get(or);if(!os.exists())throw Error('Účet majitele neexistuje.');
+        tr.update(ref,{bal:r2(me.bal-(oid===uid?0:v)),loan:r2(debt-v),loanPlan:debt===v?null:(me.loanPlan||null),tx:txlog(me,oid===uid?'Splátka vlastní půjčky (příjem majitele)':'Splátka půjčky',oid===uid?0:-v)});
+        if(oid!==uid)tr.update(or,{bal:r2(os.data().bal+v),tx:txlog(os.data(),'Splátka půjčky od '+me.name,v)});
+      }return v;
+    });m.className='msg ok';m.textContent=(mode==='take'?'Půjčeno: ':'Splaceno: ')+kc(paid);$('lamt').value='';$('lpay').value='';
+  }catch(e){m.textContent=errt(e)}finally{['ltake','lrepay','lall'].forEach(x=>$(x).disabled=false)}
+}
+$('ltake').onclick=()=>loanChange('take');$('lrepay').onclick=()=>loanChange('part');$('lall').onclick=()=>loanChange('all');
+function randomBelow(n){var x,limit=4294967296-4294967296%n;do{x=crypto.getRandomValues(new Uint32Array(1))[0]}while(x>=limit);return x%n}
+function renderChipAdmin(){
+  var staff=isAdmin||myRole==='zastupce';$('chipadmin').classList.toggle('hidden',!staff);if(!staff)return;
+  var sel=$('chipadminwho'),selected=sel.value,targets=accts.filter(x=>isAdmin||(x.role!=='majitel'&&x.id!==uid));
+  sel.innerHTML=targets.map(x=>'<option value="'+esc(x.id)+'">'+esc(x.name)+' · '+chips(chipBalance(x))+'</option>').join('');if(targets.some(x=>x.id===selected))sel.value=selected;
+}
+async function changeUserChips(add){var m=$('chipadminmsg'),id=$('chipadminwho').value,n=Number($('chipadminamount').value);m.className='msg err';
+  if(!id||!Number.isSafeInteger(n)||n<1||n>1000000){m.textContent='Vyber účet a počet 1 až 1 000 000 žetonů.';return}
+  $('chipadminadd').disabled=$('chipadminsub').disabled=true;
+  try{await runTransaction(fdb,async tr=>{var ref=fdoc(fdb,'accounts',id),sn=await tr.get(ref),self=await tr.get(fdoc(fdb,'accounts',uid));
+    if(!sn.exists())throw Error('Účet neexistuje.');var o=sn.data();
+    if(!isAdmin&&(!self.exists()||self.data().role!=='zastupce'||o.role==='majitel'||id===uid))throw Error('Tento účet nemůžeš spravovat.');
+    var total=chipBalance(o)+(add?n:-n);if(total<0)throw Error('Hráč nemá dost žetonů.');
+    tr.update(ref,{casinoChips:total,casinoTx:chipLog(o,(add?'Přidáno':'Odebráno')+' správcem '+myName,add?n:-n)});
+  });m.className='msg ok';m.textContent=(add?'Přidáno ':'Odebráno ')+chips(n)+'.';$('chipadminamount').value='';
+  }catch(e){m.textContent=errt(e)}finally{$('chipadminadd').disabled=$('chipadminsub').disabled=false}
+}
+$('chipadminadd').onclick=()=>changeUserChips(true);$('chipadminsub').onclick=()=>changeUserChips(false);
+
+const CHIP_RATE=10;
+function chipBalance(o){return Number.isSafeInteger(o.casinoChips)&&o.casinoChips>=0?o.casinoChips:0}
+function chips(n){return n.toLocaleString('cs-CZ')+' ž.'}
+function chipLog(o,t,a){return [{t,d:now(),a}].concat(o.casinoTx||[]).slice(0,30)}
+function exchangeResult(o,n,buy){
+  if(!Number.isSafeInteger(n)||n<1||n>1000000)throw Error('Zadej 1 až 1 000 000 celých žetonů.');
+  var cash=n*CHIP_RATE,c=chipBalance(o);
+  if(buy&&o.bal<cash)throw Error('Na účtu není dost peněz.');
+  if(!buy&&c<n)throw Error('Nemáš dost žetonů.');
+  return {bal:r2(o.bal+(buy?-cash:cash)),casinoChips:c+(buy?n:-n)};
+}
+async function exchangeChips(buy){var m=$('cxmsg'),n=Number($('cxamount').value),id=uid;m.className='msg err';$('cxbuy').disabled=$('cxsell').disabled=true;
+  try{await runTransaction(fdb,async tr=>{var ref=fdoc(fdb,'accounts',id),sn=await tr.get(ref);if(!sn.exists())throw Error('Účet neexistuje.');var o=sn.data(),next=exchangeResult(o,n,buy);
+    tr.update(ref,{...next,tx:txlog(o,buy?'Směna na '+chips(n):'Zpětná směna '+chips(n),n*CHIP_RATE*(buy?-1:1)),casinoTx:chipLog(o,buy?'Nákup žetonů':'Směna žetonů na Kč',n*(buy?1:-1))});
+  });m.className='msg ok';m.textContent=buy?'Vyměněno '+kc(n*CHIP_RATE)+' za '+chips(n)+'.':'Vyměněno '+chips(n)+' za '+kc(n*CHIP_RATE)+'.';
+  }catch(e){m.textContent=errt(e)}finally{$('cxbuy').disabled=$('cxsell').disabled=false}
+}
+$('cxbuy').onclick=()=>exchangeChips(true);$('cxsell').onclick=()=>exchangeChips(false);
+$('cxamount').oninput=()=>{$('cxquote').textContent=Number.isSafeInteger(Number($('cxamount').value))&&Number($('cxamount').value)>0?kc(Number($('cxamount').value)*CHIP_RATE):'Zadej počet celých žetonů.'};
+function renderCasino(){
+  renderChipAdmin();
+  $('rrbal').textContent=chips(chipBalance(myDoc));$('cxcash').textContent=kc(myDoc.bal||0);$('cxvalue').textContent='Hodnota žetonů: '+kc(chipBalance(myDoc)*CHIP_RATE);
+  $('chiptx').innerHTML=(myDoc.casinoTx||[]).map(x=>'<div class="tx"><div><b>'+esc(x.t)+'</b><small>'+esc(x.d)+'</small></div><span class="'+(x.a<0?'neg':'pos')+'">'+(x.a>0?'+':'')+chips(x.a)+'</span></div>').join('')||'<p class="empty">Zatím žádné pohyby žetonů.</p>';
+}
+function slotSettlement(me,house,bet,mult,own){
+  if(!Number.isSafeInteger(bet)||bet<1||bet>100)throw Error('Sázka musí být 1 až 100 žetonů.');
+  if(chipBalance(me)<bet)throw Error('Nemáš dost žetonů. Nejdřív si je směň.');
+  var net=bet*(mult-1),change=net+(!mult&&own?bet:0);
+  return {player:chipBalance(me)+change,house:chipBalance(house)+(!mult?bet:0),change};
+}
+const symbols=['🍒','🍋','⭐','🔔','🍇','💎'];
+const triplePayouts=[3,5,8,10,15,20];
+$('slotspin').onclick=async function(){
+  if(spinning)return;var bet=Number($('rramt').value),m=$('rrmsg'),id=uid;m.className='msg err';
+  if(!Number.isSafeInteger(bet)||bet<1||bet>100){m.textContent='Sázej 1 až 100 celých žetonů.';return}
+  spinning=true;this.disabled=true;var timer;
+  try{var oid=ownerId(),roll=[randomBelow(6),randomBelow(6),randomBelow(6)],count=new Set(roll).size,mult=count===1?triplePayouts[roll[0]]:count===2?2:0;
+    timer=setInterval(()=>{$('reels').textContent=Array.from({length:3},()=>symbols[randomBelow(6)]).join(' ')},90);
+    await runTransaction(fdb,async tr=>{
+      var ref=fdoc(fdb,'accounts',id),sn=await tr.get(ref),or=fdoc(fdb,'accounts',oid),os=oid===id?sn:await tr.get(or);
+      if(!sn.exists()||!os.exists())throw Error('Účet neexistuje.');var me=sn.data(),settled=slotSettlement(me,os.data(),bet,mult,oid===id);
+      tr.update(ref,{casinoChips:settled.player,casinoTx:chipLog(me,'Automat: '+roll.map(x=>symbols[x]).join(' ')+(mult?' · výplata ×'+mult:oid===id?' · sázka vrácena majiteli':' · prohra'),settled.change)});
+      if(!mult&&oid!==id)tr.update(or,{casinoChips:settled.house,casinoTx:chipLog(os.data(),'Automat: prohra hráče '+me.name,bet)});
+    });await new Promise(r=>setTimeout(r,1000));clearInterval(timer);$('reels').textContent=roll.map(x=>symbols[x]).join(' ');
+    m.className='msg '+(mult?'ok':'err');m.textContent=mult?'Výplata '+chips(bet*mult)+' · čistá výhra '+chips(bet*(mult-1)):oid===id?'Prohra — jako majitel dostáváš žetony zpět.':'Prohra: '+chips(bet);
+  }catch(e){m.textContent=errt(e)}finally{clearInterval(timer);spinning=false;$('slotspin').disabled=false}
+};
+var chipRounds=[],chipDrawing=false;
+function renderChipLottery(){var r=roundAt(Date.now()),d=chipRounds.find(x=>x.id===r.id),tickets=d?d.tickets:[];
+  $('lotinfo').textContent='Losování '+r.id+' ve 20:00 · losů '+tickets.length+'/300 · tvoje losy '+tickets.filter(x=>x===uid).length+' · výhra '+chips(tickets.length*4);
+  $('lotbuy').disabled=lotBusy||tickets.length>=300;
+  $('lotresults').innerHTML=chipRounds.filter(x=>x.status==='drawn').sort((a,b)=>b.closesAt-a.closesAt).slice(0,5).map(x=>'<div class="tx"><div><b>'+esc(x.id)+'</b><small>Výherce: '+esc(x.winnerName)+'</small></div><span class="pos">'+chips(x.prize)+'</span></div>').join('');
+}
+async function buyChipTicket(){if(lotBusy)return;lotBusy=true;renderChipLottery();var m=$('lotmsg'),id=uid;m.className='msg err';
+  try{var r=roundAt(Date.now());await runTransaction(fdb,async tr=>{var ref=fdoc(fdb,'casinoRounds',r.id),sn=await tr.get(ref),ar=fdoc(fdb,'accounts',id),as=await tr.get(ar),me=as.data(),d=sn.exists()?sn.data():{closesAt:r.closesAt,status:'open',tickets:[]};
+    if(Date.now()>=r.closesAt||d.status!=='open')throw Error('Začalo nové kolo. Zkus to znovu.');if(d.tickets.length>=300)throw Error('Všechny losy jsou prodané.');if(chipBalance(me)<2)throw Error('Na los potřebuješ 2 žetony.');
+    tr.set(ref,{...d,tickets:d.tickets.concat(id)});tr.update(ar,{casinoChips:chipBalance(me)-2,casinoTx:chipLog(me,'Los do loterie '+r.id,-2)});
+  });m.className='msg ok';m.textContent='Los koupený za 2 žetony.';
+  }catch(e){m.textContent=errt(e)}finally{lotBusy=false;renderChipLottery()}
+}
+async function drawChipRounds(){if(chipDrawing||!uid)return;chipDrawing=true;
+  try{for(var round of chipRounds.filter(x=>x.status==='open'&&x.closesAt<=Date.now())){var oid=ownerId();await runTransaction(fdb,async tr=>{
+    var ref=fdoc(fdb,'casinoRounds',round.id),sn=await tr.get(ref);if(!sn.exists())return;var d=sn.data();if(d.status!=='open'||d.closesAt>Date.now()||!d.tickets.length)return;
+    var winner=d.tickets[randomBelow(d.tickets.length)],wr=fdoc(fdb,'accounts',winner),ws=await tr.get(wr),or=fdoc(fdb,'accounts',oid),os=winner===oid?ws:await tr.get(or);
+    if(!ws.exists()||!os.exists())throw Error('Účet výherce nebo majitele byl odstraněn.');var prize=d.tickets.length*4,house=(d.tickets.length-1)*2,value=prize+(winner===oid?house:0);
+    tr.update(wr,{casinoChips:chipBalance(ws.data())+value,casinoTx:chipLog(ws.data(),'Výhra v loterii '+round.id+(winner===oid?' a příjem majitele':''),value)});
+    if(winner!==oid&&house>0)tr.update(or,{casinoChips:chipBalance(os.data())+house,casinoTx:chipLog(os.data(),'Loterie '+round.id+': nevýherní losy',house)});
+    tr.update(ref,{status:'drawn',winner,winnerName:ws.data().name,prize,drawnAt:Date.now()});
+  })}}catch(e){$('lotmsg').className='msg err';$('lotmsg').textContent=errt(e)}finally{chipDrawing=false}
+}
+function startChips(){
+  $('lotbuy').onclick=buyChipTicket;chipRounds=[];
+  unsubs.push(db.collection('casinoRounds').onSnapshot(sn=>{chipRounds=mapd(sn);renderChipLottery();drawChipRounds()},e=>{$('lotmsg').textContent='Žetonová loterie: '+errt(e)}));
+  // Previously bought cash tickets keep their original payouts in Kč.
+  unsubs.push(db.collection('lottery').onSnapshot(sn=>{rounds=mapd(sn);drawDue();$('legacyLottery').textContent=rounds.some(x=>x.status==='open')?'Dříve zakoupené korunové losy budou vyhodnocené zvlášť a vyplacené v Kč.':''},()=>{}));
+  var timer=setInterval(()=>{renderChipLottery();drawChipRounds();drawDue()},15000);unsubs.push(()=>clearInterval(timer));
+}
+
+function roundAt(time){
+  var parts=new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Prague',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',hourCycle:'h23'}).formatToParts(new Date(time)),p=Object.fromEntries(parts.map(x=>[x.type,x.value]));
+  var date=new Date(Date.UTC(+p.year,+p.month-1,+p.day+(+p.hour>=20?1:0),12)),id=date.toISOString().slice(0,10);
+  var hour=Number(new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Prague',hour:'2-digit',hourCycle:'h23'}).format(date));
+  return {id,closesAt:date.getTime()+(20-hour)*3600000};
+}
+var rounds=[],lotBusy=false;
+var drawing=false;
+async function drawDue(){if(drawing||!uid)return;drawing=true;
+  try{for(var round of rounds.filter(x=>x.status==='open'&&x.closesAt<=Date.now())){
+    var oid=ownerId();await runTransaction(fdb,async tr=>{
+      var ref=fdoc(fdb,'lottery',round.id),sn=await tr.get(ref);if(!sn.exists())return;var d=sn.data();if(d.status!=='open'||d.closesAt>Date.now()||!d.tickets.length)return;
+      var winner=d.tickets[randomBelow(d.tickets.length)],wr=fdoc(fdb,'accounts',winner),ws=await tr.get(wr),or=fdoc(fdb,'accounts',oid),os=winner===oid?ws:await tr.get(or);
+      if(!ws.exists()||!os.exists())throw Error('Losování čeká: účet výherce nebo majitele byl odstraněn.');
+      var prize=d.tickets.length*40,house=(d.tickets.length-1)*20;
+      tr.update(wr,{bal:r2(ws.data().bal+prize+(winner===oid?house:0)),tx:txlog(ws.data(),'Výhra v loterii '+round.id+(winner===oid?' a příjem majitele':''),prize+(winner===oid?house:0))});
+      if(winner!==oid&&house>0)tr.update(or,{bal:r2(os.data().bal+house),tx:txlog(os.data(),'Loterie '+round.id+': nevýherní losy',house)});
+      tr.update(ref,{status:'drawn',winner,winnerName:ws.data().name,prize,drawnAt:Date.now()});
+    });
+  }}catch(e){$('lotmsg').className='msg err';$('lotmsg').textContent=errt(e)}finally{drawing=false}
+}
+
+
+async function enter(user,typed,isNew){
+  uid=user.uid;
+  if(user.email===ADMIN){myName="Zdeněk Buchta";$("who").textContent=myName;S.people.forEach(intr);show("app");startAdmin();startCommon();tab("acc");return}
+  var ref=db.doc("accounts/"+uid),ex=await ref.get();
+  if(!ex.exists)await ref.set({name:typed,bal:500,role:"zakaznik",sav:0,savAt:lastMon(),tx:[]});
+  var nm=ex.exists?ex.data().name:typed;
+  db.doc("requests/"+uid).set({name:nm,type:isNew?"register":"login",at:Date.now()}).catch(function(){});
+  myName=nm;enterMember(nm);startCommon();tab("acc");
+}
+$("doreg").onclick=async function(){
+  var n=$("rn").value.trim(),pw=$("rp").value,e=$("rerr");e.textContent="";
+  if(!n||!pw){e.textContent="Vyplň jméno i heslo.";return}
+  if(!mail(n)){e.textContent="Jméno musí obsahovat písmena nebo čísla.";return}
+  try{
+    var tk=null;try{tk=await db.doc("logins/"+slug(n)).get()}catch(e2){}
+    if(tk&&tk.exists){e.textContent="Tohle jméno už je obsazené.";return}
+    var c=await createUserWithEmailAndPassword(auth,mail(n),pw);
+    await db.doc("logins/"+slug(n)).set({email:mail(n),uid:c.user.uid}).catch(function(){});
+    await enter(c.user,n,true);
+  }catch(x){e.textContent=aerr(x.code)}
+};
+$("go").onclick=async function(){
+  var n=$("u").value.trim(),pw=$("p").value,e=$("lerr");e.textContent="";
+  if(!mail(n)||!pw){e.textContent="Nesprávné jméno nebo heslo.";return}
+  try{var em=await emailFor(n);var c=await signInWithEmailAndPassword(auth,em,pw);await enter(c.user,n,false)}catch(x){e.textContent=aerr(x.code)}
+};
+$("logout").onclick=function(){signOut(auth).catch(function(){});stopScan();uid=null;stop();reqs=[];apps={};msgsIn=[];msgsOut=[];anns=[];myDoc={};accts=[];myRole="zakaznik";["team","ann","qr","set","loan","rr","ppl"].forEach(function(x){$(x).classList.add("hidden")});$("reqcard").classList.add("hidden");$("p").value="";show("login")};
+function startAdmin(){
+  if(!db)return;isAdmin=true;if(uid)S.people[0].uid=uid;
+  unsubs.push(db.collection("requests").onSnapshot(function(s){reqs=s.docs.map(function(d){var o=d.data();o.id=d.id;return o});showReqs()}));
+  unsubs.push(db.collection("accounts").onSnapshot(function(sn){
+    sn.docs.forEach(function(d){
+      var o=d.data(),p=S.people.filter(function(x){return x.uid===d.id})[0];
+      if(!p){p={id:S.nid++,uid:d.id,tx:[]};S.people.push(p)}
+      p.name=o.name||"Bez jména";p.bal=o.bal;p.tx=o.tx||[];p.sav=o.sav;p.savAt=o.savAt;p.card=o.card;p.casinoChips=o.casinoChips||0;if(p.id!==1)p.role=o.role||"zakaznik";
+      sent[d.id]=JSON.stringify([p.name,p.bal,p.tx,p.role,p.sav,p.savAt,p.card]);intr(p);
+    });render();
+  }));
+}
+var done={};
+function auto(){
+  if(!db||!isAdmin)return;
+  reqs.forEach(function(r){
+    var k=r.id+":"+r.at;if(done[k])return;done[k]=1;
+    if(apps[r.id]&&apps[r.id].reqAt===r.at)return;
+    db.doc("approvals/"+r.id).set({reqAt:r.at,ok:true}).catch(function(x){var m=$("reqmsg");m.className="msg err";m.textContent="Nepovedlo se: "+((x&&(x.code||x.message))||"")});
+    if(!S.people.some(function(p){return p.uid===r.id})){S.people.push({id:S.nid++,uid:r.id,name:r.name,bal:500,tx:[]});render()}
+  });
+}
+function showReqs(){
+  var l=reqs.slice().sort(function(a,b){return b.at-a.at}).slice(0,6);
+  $("reqcard").classList.toggle("hidden",!l.length);
+  if(reqs.length>lastN&&lastN>0)document.title="🔔 NašeBanka – nová aktivita";
+  lastN=reqs.length;
+  $("reqs").innerHTML=l.map(function(r){return '<div class="prow"><div class="pn"><b>'+esc(r.name)+'</b><small>'+(r.type==="register"?"Nová registrace – účet vytvořen":"Přihlášení")+' · '+new Date(r.at).toLocaleTimeString("cs-CZ",{hour:"2-digit",minute:"2-digit"})+'</small></div></div>'}).join("");
+}
+$("pay").onclick=function(){
+  var m=$("msg"),me=S.people[0],to=find(parseInt($("to").value,10)),v=parseFloat($("amt").value);
+  m.className="msg err";
+  if(!to){m.textContent="Nejdřív přidej příjemce v sekci Lidé.";return}
+  if(!(v>0)){m.textContent="Zadejte částku větší než 0.";return}
+  if(v>me.bal){m.textContent="Na účtu není dost peněz.";return}
+  var n=$("note").value.trim();
+  me.bal-=v;to.bal+=v;
+  log(me,"Platba → "+to.name+(n?" ("+n+")":""),-v);
+  log(to,"Od "+me.name+(n?" ("+n+")":""),v);
+  m.className="msg ok";m.textContent="Platba odeslána: "+kc(v);
+  $("amt").value="";$("note").value="";render();
+};
+$("addp").onclick=async function(){
+  var n=$("nn").value.trim(),pw=$("np").value;
+  if(!n||!pw){amsg("Zadej jméno i heslo.",false);return}
+  if(!mail(n)){amsg("Jméno musí obsahovat písmena nebo čísla.",false);return}
+  try{await createPerson(n,pw);$("nn").value="";$("np").value="";amsg(n+" přidán(a) s 500 Kč.",true)}catch(x){amsg(aerr(x.code),false)}
+};
+$("plist").onclick=function(e){
+  var b=e.target.closest("button");if(!b)return;
+  var p=find(parseInt(b.getAttribute("data-i"),10)),a=b.getAttribute("data-a");if(!p)return;
+  if(a==="del"){if(db&&p.uid)db.doc("accounts/"+p.uid).delete().catch(function(){});S.people=S.people.filter(function(x){return x!==p});amsg(p.name+" smazán(a).",true);render();return}
+  var v=parseFloat(b.parentNode.querySelector(".ai").value);
+  if(!(v>0)){amsg("Zadej částku větší než 0.",false);return}
+  if(a==="add"){p.bal+=v;log(p,"Vklad od správce",v);amsg("Přidáno "+kc(v)+" pro "+p.name+".",true)}
+  else{if(v>p.bal){amsg(p.name+" má jen "+kc(p.bal)+".",false);return}p.bal-=v;log(p,"Odečteno správcem",-v);amsg("Odebráno "+kc(v)+" osobě "+p.name+".",true)}
+  render();
+};
+$("plist").onchange=function(e){
+  var t=e.target;if(!t.classList.contains("rs"))return;
+  var p=find(parseInt(t.getAttribute("data-i"),10));if(!p)return;
+  p.role=t.value;amsg(p.name+": role "+(p.role==="zastupce"?"Zástupce":"Zákazník")+".",true);render();
+};
+$("clr").onclick=function(){S.people.forEach(function(p){p.tx=[]});amsg("Historie smazána.",true);render()};
+$("rst").onclick=function(){S.people.forEach(function(p){p.bal=500;p.tx=[]});amsg("Všichni mají 500 Kč, historie smazána.",true);render()};
